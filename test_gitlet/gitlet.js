@@ -104,11 +104,15 @@ var gitlet = module.exports = {
 
   // **init()** initializes the current directory as a new repository.
   init: function (opts) {
-
+    console.log("Starting init with options:", opts);
     // Abort if already a repository.
-    if (files.inRepo()) { return; }
+    if (files.inRepo()) {
+      console.log("Already in a repo, aborting");
+      return;
+    }
 
     opts = opts || {};
+    console.log("Creating gitlet structure...");
 
     // Create a JS object that mirrors the Git basic directory
     // structure.
@@ -126,6 +130,7 @@ var gitlet = module.exports = {
       }
     };
 
+    console.log("Writing files to disk...");
     // Write the standard Git directory structure using the
     // `gitletStructure` JS object.  If the repository is not bare,
     // put the directories inside the `.gitlet` directory.  If the
@@ -133,15 +138,19 @@ var gitlet = module.exports = {
     // repository.
     files.writeFilesFromTree(opts.bare ? gitletStructure : { ".gitlet": gitletStructure },
       process.cwd());
+    console.log("Init completed successfully");
   },
 
   // **add()** adds files that match `path` to the index.
   add: function (path, _) {
+    console.log("Starting add command with path:", path);
     files.assertInRepo();
     config.assertNotBare();
 
     // Get the paths of all the files matching `path`.
+    console.log("Getting all files matching path:", path);
     var addedFiles = files.lsRecursive(path);
+    console.log("Found files:", addedFiles);
 
     // Abort if no files matched `path`.
     if (addedFiles.length === 0) {
@@ -150,7 +159,10 @@ var gitlet = module.exports = {
       // Otherwise, use the `update_index()` Git command to actually add
       // the files.
     } else {
-      addedFiles.forEach(function (p) { gitlet.update_index(p, { add: true }); });
+      addedFiles.forEach(function (p) {
+        console.log("Adding file to index:", p);
+        gitlet.update_index(p, { add: true });
+      });
     }
   },
 
@@ -714,13 +726,16 @@ var gitlet = module.exports = {
   // **update_index()** adds the contents of the file at `path` to the
   // index, or removes the file from the index.
   update_index: function (path, opts) {
+    console.log("update_index called with path:", path, "opts:", opts);
     files.assertInRepo();
     config.assertNotBare();
     opts = opts || {};
 
     var pathFromRoot = files.pathFromRepoRoot(path);
+    console.log("Path from repo root:", pathFromRoot);
     var isOnDisk = fs.existsSync(path);
     var isInIndex = index.hasFile(path, 0);
+    console.log("File exists on disk:", isOnDisk, "File is in index:", isInIndex);
 
     // Abort if `path` is a directory.  `update_index()` only handles
     // single files.
@@ -754,7 +769,10 @@ var gitlet = module.exports = {
       // If file is on disk and either `-add` was passed or the file is
       // in the index, add the file's current content to the index.
     } else if (isOnDisk && (opts.add || isInIndex)) {
-      index.writeNonConflict(path, files.read(files.workingCopyPath(path)));
+      console.log("Adding file to index:", path);
+      var content = files.read(files.workingCopyPath(path));
+      console.log("File content length:", content ? content.length : 0);
+      index.writeNonConflict(path, content);
       return "\n";
 
       // Abort if the file is not on disk and `--remove` not passed.
@@ -1058,8 +1076,26 @@ var objects = {
   // **ancestors()** returns an array of the hashes of all the
   // ancestor commits of `commitHash`.
   ancestors: function (commitHash) {
-    var parents = objects.parentHashes(objects.read(commitHash));
-    return util.flatten(parents.concat(parents.map(objects.ancestors)));
+    var ancestors = [];
+    var toProcess = [commitHash];
+    var processed = {};
+
+    while (toProcess.length > 0) {
+      var hash = toProcess.shift();
+      if (hash !== commitHash && !processed[hash]) {
+        ancestors.push(hash);
+        processed[hash] = true;
+      }
+
+      var parents = objects.parentHashes(objects.read(hash)) || [];
+      for (var i = 0; i < parents.length; i++) {
+        if (!processed[parents[i]]) {
+          toProcess.push(parents[i]);
+        }
+      }
+    }
+
+    return ancestors;
   },
 
   // **parentHashes()** parses `str` as a commit and returns the
@@ -1743,6 +1779,7 @@ var files = {
   // **inRepo()** returns true if the current working directory is
   // inside a repository.
   inRepo: function () {
+    console.log("Checking if in repo: " + process.cwd());
     return files.gitletPath() !== undefined;
   },
 
@@ -1762,8 +1799,35 @@ var files = {
   // **write()** writes `content` to file at `path`, overwriting
   // anything that is already there.
   write: function (path, content) {
-    var prefix = require("os").platform() == "win32" ? "." : "/";
-    files.writeFilesFromTree(util.setIn({}, path.split(nodePath.sep).concat(content)), prefix);
+    console.log("write called with path:", path, "content length:", content ? content.length : 0);
+
+    // 为 Windows 系统处理路径
+    if (require("os").platform() == "win32") {
+      // 确保目录存在
+      var dir = nodePath.dirname(path);
+      if (!fs.existsSync(dir)) {
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+        } catch (e) {
+          console.error("Error creating directory:", e.message);
+        }
+      }
+
+      // 写入文件
+      try {
+        fs.writeFileSync(path, content);
+      } catch (e) {
+        console.error("Error writing file:", path, e.message);
+        // 尝试使用相对路径
+        var relativePath = path.replace(/^[A-Z]:\\/, '');
+        console.log("Trying relative path:", relativePath);
+        fs.writeFileSync(relativePath, content);
+      }
+    } else {
+      // 非 Windows 系统的处理逻辑
+      var prefix = "/";
+      files.writeFilesFromTree(util.setIn({}, path.split(nodePath.sep).concat(content)), prefix);
+    }
   },
 
   // **writeFilesFromTree()** takes `tree` of files as a nested JS obj
@@ -1816,13 +1880,14 @@ var files = {
           return dir;
         } else if (fs.existsSync(potentialGitletPath)) {
           return potentialGitletPath;
-        } else if (dir !== "/") {
+        } else if (dir !== "/" && dir !== "C:\\" && dir !== "D:\\") {
           return gitletDir(nodePath.join(dir, ".."));
         }
       }
     };
 
     var gDir = gitletDir(process.cwd());
+    console.log("gitletPath: gDir =", gDir, "path =", path);
     if (gDir !== undefined) {
       return nodePath.join(gDir, path || "");
     }
@@ -1831,19 +1896,35 @@ var files = {
   // **workingCopyPath()** returns a string made by concatenating `path` to
   // the absolute path of the root of the repository.
   workingCopyPath: function (path) {
-    return nodePath.join(nodePath.join(files.gitletPath(), ".."), path || "");
+    var repoRoot = nodePath.join(files.gitletPath(), "..");
+    console.log("workingCopyPath called with path:", path);
+    var gitletPath = files.gitletPath();
+    console.log("Gitlet path:", gitletPath);
+    var result = nodePath.join(nodePath.join(gitletPath, ".."), path || "");
+    console.log("Working copy path result:", result);
+    return result;
   },
 
   // **lsRecursive()** returns an array of all the files found in a
   // recursive search of `path`.
   lsRecursive: function (path) {
+    console.log("lsRecursive called with path:", path);
     if (!fs.existsSync(path)) {
+      console.log("Path does not exist:", path);
       return [];
     } else if (fs.statSync(path).isFile()) {
+      console.log("Path is a file:", path);
       return [path];
     } else if (fs.statSync(path).isDirectory()) {
+      console.log("Path is a directory:", path);
       return fs.readdirSync(path).reduce(function (fileList, dirChild) {
-        return fileList.concat(files.lsRecursive(nodePath.join(path, dirChild)));
+        console.log("Processing directory child:", dirChild, "in", path);
+        var fullPath = nodePath.join(path, dirChild);
+        if (dirChild === ".gitlet") {
+          console.log("Skipping .gitlet directory");
+          return fileList;
+        }
+        return fileList.concat(files.lsRecursive(fullPath));
       }, []);
     }
   },
